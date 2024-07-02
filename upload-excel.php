@@ -1,5 +1,5 @@
 <?php
-require 'vendor/autoload.php';  // Ensure this path is correct
+require 'vendor/autoload.php';
 
 use PhpOffice\PhpSpreadsheet\IOFactory;
 
