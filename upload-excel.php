@@ -15,26 +15,41 @@ if ($conn->connect_error) {
 }
 
 function startsWithUKCode($phoneNumber) {
-    return preg_match('/^\+44/', $phoneNumber);
+    return preg_match('/^44/', $phoneNumber);
+}
+
+function phoneNumberExists($phoneNumber, $conn) {
+    $sql = "SELECT 1 FROM users WHERE phone_number = ?";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("s", $phoneNumber);
+    $stmt->execute();
+    $stmt->store_result();
+    return $stmt->num_rows > 0;
 }
 
 if (isset($_POST["import"])) {
     $filename = $_FILES["file"]["tmp_name"];
     $fileType = pathinfo($_FILES["file"]["name"], PATHINFO_EXTENSION);
     $importSuccess = true;
+    $errors = [];
+    $alreadyExists = [];
 
     if ($_FILES["file"]["size"] > 0) {
         try {
+            $conn->begin_transaction();
+            $phoneNumbers = [];
+
             if ($fileType === 'csv') {
                 $file = fopen($filename, "r");
                 $rowNumber = 0;
                 while (($data = fgetcsv($file, 10000, ",")) !== FALSE) {
                     $rowNumber++;
-                    // Skip the header row
-                    if ($rowNumber == 1) continue;
+                    if ($rowNumber == 1) continue; // Skip header row
 
                     if (count($data) < 3) {
-                        continue;
+                        $errors[] = "Row $rowNumber has missing columns.";
+                        $importSuccess = false;
+                        break;
                     }
 
                     $firstName = $data[0];
@@ -42,33 +57,49 @@ if (isset($_POST["import"])) {
                     $phoneNumber = $data[2];
 
                     if (!startsWithUKCode($phoneNumber)) {
+                        $errors[] = "Row $rowNumber: Phone number $phoneNumber does not start with +44.";
+                        $importSuccess = false;
+                        break;
+                    }
+
+                    if (in_array($phoneNumber, $phoneNumbers) || phoneNumberExists($phoneNumber, $conn)) {
+                        $alreadyExists[] = "Row $rowNumber: Phone number $phoneNumber already exists.";
                         continue;
                     }
+                    $phoneNumbers[] = $phoneNumber;
 
                     $sql = "INSERT INTO users (first_name, last_name, phone_number) VALUES (?, ?, ?)";
                     $stmt = $conn->prepare($sql);
                     $stmt->bind_param("sss", $firstName, $lastName, $phoneNumber);
 
                     if (!$stmt->execute()) {
+                        $errors[] = "Row $rowNumber: Database error.";
                         $importSuccess = false;
+                        break;
                     }
                 }
                 fclose($file);
             } else {
                 $spreadsheet = IOFactory::load($filename);
                 $worksheet = $spreadsheet->getActiveSheet();
+                $rowNumber = 0;
 
                 foreach ($worksheet->getRowIterator() as $row) {
+                    $rowNumber++;
+                    if ($rowNumber == 1) continue; // Skip header row
+
                     $cellIterator = $row->getCellIterator();
                     $cellIterator->setIterateOnlyExistingCells(FALSE);
-
                     $data = [];
+
                     foreach ($cellIterator as $cell) {
                         $data[] = $cell->getValue();
                     }
 
                     if (count($data) < 3) {
-                        continue;
+                        $errors[] = "Row $rowNumber has missing columns.";
+                        $importSuccess = false;
+                        break;
                     }
 
                     $firstName = $data[0];
@@ -76,30 +107,43 @@ if (isset($_POST["import"])) {
                     $phoneNumber = $data[2];
 
                     if (!startsWithUKCode($phoneNumber)) {
+                        $errors[] = "Row $rowNumber: Phone number $phoneNumber does not start with +44.";
+                        $importSuccess = false;
+                        break;
+                    }
+
+                    if (in_array($phoneNumber, $phoneNumbers) || phoneNumberExists($phoneNumber, $conn)) {
+                        $alreadyExists[] = "Row $rowNumber: Phone number $phoneNumber already exists.";
                         continue;
                     }
+                    $phoneNumbers[] = $phoneNumber;
 
                     $sql = "INSERT INTO users (first_name, last_name, phone_number) VALUES (?, ?, ?)";
                     $stmt = $conn->prepare($sql);
                     $stmt->bind_param("sss", $firstName, $lastName, $phoneNumber);
 
                     if (!$stmt->execute()) {
+                        $errors[] = "Row $rowNumber: Database error.";
                         $importSuccess = false;
+                        break;
                     }
                 }
             }
 
             if ($importSuccess) {
+                $conn->commit();
                 echo "<script type=\"text/javascript\">
-                        alert(\"File has been successfully imported.\");
+                        alert(\"File has been successfully imported. " . implode(" ", $alreadyExists) . "\");
                       </script>";
             } else {
+                $conn->rollback();
                 echo "<script type=\"text/javascript\">
-                        alert(\"There were some errors during the import.\");
+                        alert(\"Import failed: " . implode(" ", $errors) . "\");
                       </script>";
             }
 
         } catch (Exception $e) {
+            $conn->rollback();
             echo "<script type=\"text/javascript\">
                     alert(\"Error loading file: " . $e->getMessage() . "\");
                   </script>";
